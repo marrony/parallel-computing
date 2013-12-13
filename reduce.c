@@ -9,6 +9,7 @@
 #include <OpenCL/opencl.h>
 
 #define SHARED
+#define NUM_GROUPS (2)
 #define DATA_SIZE (16)
 
 #define STRINGFY(x) #x
@@ -41,12 +42,14 @@ __kernel void kernel_reduce(__global float* input, __global float* output, __loc
 
     sinput[local_idx] = input[global_idx];
     barrier(CLK_GLOBAL_MEM_FENCE);
+    //write_mem_fence(CLK_GLOBAL_MEM_FENCE);
 
     for(int i = block_size/2; i > 0; i >>= 1) {
         if(local_idx < i)
             sinput[local_idx] += sinput[local_idx + i];
 
-        barrier(CLK_GLOBAL_MEM_FENCE);
+        barrier(CLK_LOCAL_MEM_FENCE);
+        //mem_fence(CLK_LOCAL_MEM_FENCE);
     }
 
     if(local_idx == 0)
@@ -55,6 +58,32 @@ __kernel void kernel_reduce(__global float* input, __global float* output, __loc
 );
 
 ////////////////////////////////////////////////////////////////////////////////
+
+int execute_kernel(cl_command_queue commands, cl_kernel kernel, cl_mem input, cl_mem output) {
+    int err;
+
+    err = 0;
+    err |= clSetKernelArg(kernel, 0, sizeof(cl_mem), &input);
+    err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &output);
+#ifdef SHARED
+    err |= clSetKernelArg(kernel, 2, sizeof(cl_float)*DATA_SIZE/NUM_GROUPS, NULL);
+#endif
+
+    if (err != CL_SUCCESS) {
+        printf("Error: Failed to set kernel arguments! %d\n", err);
+        return err;
+    }
+
+    size_t global = DATA_SIZE;
+    size_t local = DATA_SIZE/NUM_GROUPS;
+    err = clEnqueueNDRangeKernel(commands, kernel, 1, NULL, &global, &local, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        printf("Error: Failed to execute kernel!\n");
+        return err;
+    }
+
+    return err;
+}
 
 int main(int argc, char** argv) {
     int err;                            // error code returned from api calls
@@ -73,10 +102,10 @@ int main(int argc, char** argv) {
 
     cl_mem input;                       // device memory used for the input array
     cl_mem output;                      // device memory used for the output array
+    cl_mem temporary;                   //
 
     int i = 0;
-    unsigned int count = DATA_SIZE;
-    for(i = 0; i < count; i++)
+    for(i = 0; i < DATA_SIZE; i++)
         data[i] = i+1; 
 
     err = clGetDeviceIDs(NULL, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
@@ -126,47 +155,33 @@ int main(int argc, char** argv) {
         exit(1);
     }
 
-    input = clCreateBuffer(context,  CL_MEM_READ_ONLY,  sizeof(float) * count, NULL, NULL);
-    output = clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(float) * count, NULL, NULL);
-    if (!input || !output) {
+    input = clCreateBuffer(context,  CL_MEM_READ_ONLY,  sizeof(float) * DATA_SIZE, NULL, NULL);
+    output = clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(float) * DATA_SIZE, NULL, NULL);
+    temporary = clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(float) * DATA_SIZE/NUM_GROUPS, NULL, NULL);
+    if (!input || !output || !temporary) {
         printf("Error: Failed to allocate device memory!\n");
         exit(1);
     }    
 
-    err = clEnqueueWriteBuffer(commands, input, CL_TRUE, 0, sizeof(float) * count, data, 0, NULL, NULL);
+    err = clEnqueueWriteBuffer(commands, input, CL_TRUE, 0, sizeof(float) * DATA_SIZE, data, 0, NULL, NULL);
     if (err != CL_SUCCESS) {
         printf("Error: Failed to write to source array!\n");
         exit(1);
     }
 
-    err = 0;
-    err  = clSetKernelArg(kernel, 0, sizeof(cl_mem), &input);
-    err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &output);
-#ifdef SHARED
-    err |= clSetKernelArg(kernel, 2, sizeof(cl_float)*DATA_SIZE/4, NULL);
-#endif
-    if (err != CL_SUCCESS) {
-        printf("Error: Failed to set kernel arguments! %d\n", err);
+    err = execute_kernel(commands, kernel, input, temporary);
+    if(err != CL_SUCCESS) {
         exit(1);
     }
 
-    err = clGetKernelWorkGroupInfo(kernel, device_id, CL_KERNEL_WORK_GROUP_SIZE, sizeof(local), &local, NULL);
-    if (err != CL_SUCCESS) {
-        printf("Error: Failed to retrieve kernel work group info! %d\n", err);
+    err = execute_kernel(commands, kernel, temporary, output);
+    if(err != CL_SUCCESS) {
         exit(1);
-    }
-
-    global = DATA_SIZE;
-    local = DATA_SIZE/4;
-    err = clEnqueueNDRangeKernel(commands, kernel, 1, NULL, &global, &local, 0, NULL, NULL);
-    if (err != CL_SUCCESS) {
-        printf("Error: Failed to execute kernel!\n");
-        return EXIT_FAILURE;
     }
 
     clFinish(commands);
 
-    err = clEnqueueReadBuffer( commands, output, CL_TRUE, 0, sizeof(float) * count, results, 0, NULL, NULL );  
+    err = clEnqueueReadBuffer( commands, output, CL_TRUE, 0, sizeof(float) * DATA_SIZE, results, 0, NULL, NULL );  
     if (err != CL_SUCCESS) {
         printf("Error: Failed to read output array! %d\n", err);
         exit(1);
