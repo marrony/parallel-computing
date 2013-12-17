@@ -7,7 +7,7 @@ BINS=$(addprefix $(DIR)/, $(basename $(SRCS)))
 
 bin/%: %.c
 	@mkdir -p $(DIR)
-	gcc -o $@ $< $(LDFLAGS)
+	gcc -o $@ $< $(LDFLAGS) $(ARGS)
 
 all: $(BINS)
 
